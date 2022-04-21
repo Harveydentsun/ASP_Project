@@ -3,6 +3,7 @@ import scipy.stats as spst
 import abc
 from . import sv_abc as sv
 from . import bsm
+import scipy.integrate as spint
 
 
 class GarchCondMcABC(sv.SvABC, sv.CondMcBsmABC, abc.ABC):
