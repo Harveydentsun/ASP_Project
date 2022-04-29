@@ -26,8 +26,7 @@ class GarchCondMcABC(sv.SvABC, sv.CondMcBsmABC, abc.ABC):
         """
         return NotImplementedError
 
-    def cond_spot_sigma(self, sigma_0, texp):
-        var_0 = sigma_0**2
+    def cond_spot_sigma(self, var_0, texp):
         vol_final, var_mean, vol_mean, inv_vol_mean = self.cond_states(var_0, texp)
 
         spot_cond = 2 * (vol_final - np.sqrt(var_0)) / self.vov \
@@ -108,6 +107,17 @@ class GarchMcTimeStep(GarchCondMcABC):
         return log_var_t
 
     def cond_states(self, var_0, texp):
+        """
+        Final vol, integrated variance, integrated vol and integrated inverse vol over dt given var_0
+        The int_var is normalized by dt
+
+        Args:
+            var_0: initial variance
+            dt: time step
+
+        Returns:
+            (vol_final, var_mean, vol_mean, inverse_vol_mean)
+        """
         tobs = self.tobs(texp)
         n_dt = len(tobs)
         dt = np.diff(tobs, prepend=0)
@@ -145,6 +155,240 @@ class GarchMcTimeStep(GarchCondMcABC):
                 mean_inv_vol += weight[i+1] / vol_t
         else:
             raise ValueError(f'Invalid scheme: {self.scheme}')
+
+        return vol_t, mean_var, mean_vol, mean_inv_vol
+
+
+class GarchMcTubikanec2020(GarchCondMcABC):
+    """
+        The implementation of Tubikanec I, Tamborrino M, Lansky P, et al. (2020)'s paper
+        Qualitative properties of numerical methods for the inhomogeneous geometric Brownian motion
+        implement GARCH diffusion model under different IGBM approximation schemes.
+
+        References:
+            - Tubikanec I, Tamborrino M, Lansky P, et al. Qualitative properties of numerical methods for the inhomogeneous geometric Brownian motion[J]. arXiv preprint arXiv:2003.10193, 2020.
+
+        """
+
+    def set_mc_params(self, n_path=10000, dt=0.05, rn_seed=None, antithetic=True, scheme=1):
+        """
+        Set MC parameters
+
+        Args:
+            n_path: number of paths
+            dt: time step
+            rn_seed: random number seed
+            antithetic: antithetic
+            scheme: 0 for Euler, 1 for Milstein (default), 2 for Lie-1, 3 for Lie-2, 4 for Strang-1,
+                    5 for Strang-2, 6 for linear-ODE, 7 for log-ODE
+
+        References:
+            - Tubikanec I, Tamborrino M, Lansky P, et al. Qualitative properties of numerical methods for the inhomogeneous geometric Brownian motion[J]. arXiv preprint arXiv:2003.10193, 2020.
+        """
+        super().set_mc_params(n_path, dt, rn_seed, antithetic)
+        self.scheme = scheme
+
+    def var_step_euler(self, var_0, dt, milstein=True):
+        """
+        Euler/Milstein Schemes:
+        v_(t+dt) = v_t + mr * (theta - v_t) * dt + vov * v_t Z * sqrt(dt) + (vov^2/2) v_t (Z^2-1) dt
+
+        Args:
+            var_0: initial variance
+            dt: delta t, time step
+
+        Returns: Variance path (time, path) including the value at t=0
+        Location: Equation 7 & 8, Page 5
+        """
+
+        zz = self.rv_normal()
+        # Equation 7
+        var_t = var_0 + self.mr * (self.theta - var_0) * dt + self.vov * var_0 * np.sqrt(dt) * zz
+        if milstein:
+            # Equation 8
+            var_t += (self.vov**2 / 2) * var_0 * dt * (zz**2 - 1)
+
+        # although rare, floor at zero
+        var_t[var_t < 0] = 0.0
+
+        return var_t
+
+    def var_step_lie(self, var_0, dt, L1=True):
+        """
+        Lie-Trotter Schemes, including L1 and L2:
+
+        Args:
+            var_0: initial variance
+            dt: delta t, time step
+            L1: whether type L1 is used (otherwise L2 is used)
+
+        Returns: Variance path (time, path) including the value at t=0
+        Location: Equation 15 & 16, Page 6
+        """
+        zz = self.rv_normal()
+
+        coeff = np.exp(-(self.mr + self.vov**2 / 2)*dt + self.vov * np.sqrt(dt) * zz)
+        if L1:
+            # Equation 15
+            var_t = coeff * (var_0 + self.mr * self.theta * dt)
+        else:
+            # Equation 16
+            var_t = coeff * var_0 + self.mr * self.theta * dt
+
+        # although rare, floor at zero
+        var_t[var_t < 0] = 0.0
+
+        return var_t
+
+    def var_step_strang(self, var_0, dt, S1=True):
+        """
+        Strang Schemes, including S1 and S2:
+
+        Args:
+            var_0: initial variance
+            dt: delta t, time step
+            S1: whether type S1 is used (otherwise S2 is used)
+
+        Returns: Variance path (time, path) including the value at t=0
+        Location: Equation 17 & 18, Page 6
+        """
+        zz = self.rv_normal()
+
+        if S1:
+            # Equation 17
+            var_t = np.exp(-(self.mr + self.vov**2 / 2)*dt + self.vov * np.sqrt(dt) * zz) \
+                    * (var_0 + self.mr * self.theta * dt/2) + self.mr * self.theta * dt/2
+        else:
+            zz2 = self.rv_normal()
+            # Equation 18
+            var_t = np.exp(-(self.mr + self.vov**2 / 2)*dt + self.vov * np.sqrt(dt/2) * (zz + zz2)) * var_0 + \
+                    self.mr * self.theta * dt * np.exp(-(self.mr + self.vov**2 / 2)*dt/2 + self.vov * np.sqrt(dt/2) * zz)
+
+        # although rare, floor at zero
+        var_t[var_t < 0] = 0.0
+
+        return var_t
+
+    def var_step_linear(self, var_0, dt):
+        """
+        Piecewise linear Schemes:
+
+        Args:
+            var_0: initial variance
+            dt: delta t, time step
+
+        Returns: Variance path (time, path) including the value at t=0
+        Location: Equation 22, Page 7
+        """
+        zz = self.rv_normal()
+
+        log_coeff = -(self.mr + self.vov ** 2 / 2) * dt + self.vov * np.sqrt(dt) * zz
+        coeff = np.exp(log_coeff)
+        # Equation 22
+        var_t = var_0 * coeff + self.mr * self.theta * dt * (coeff - 1) / log_coeff
+
+        # although rare, floor at zero
+        var_t[var_t < 0] = 0.0
+
+        return var_t
+
+
+    def var_step_logode(self, var_0, dt):
+        """
+        log ODE schemes:
+
+        Args:
+            var_0: initial variance
+            dt: time step
+
+        Returns: Variance path (time, path) including the value at t=0
+        Location: Equation 23, Page 7
+        """
+
+        zz = self.rv_normal()
+        rho = self.rv_normal() / np.sqrt(12)
+
+        log_coeff = -(self.mr + self.vov ** 2 / 2) * dt + self.vov * np.sqrt(dt) * zz
+        coeff = np.exp(log_coeff)
+        # Equation 23
+        var_t = var_0 * coeff + self.mr * self.theta * dt * (coeff - 1) / log_coeff * \
+                (1 - self.vov * rho * np.sqrt(dt) + self.vov**2 * dt * (3/5*rho**2 + 1/30))
+
+        return var_t
+
+    def cond_sequence(self, var_0, texp):
+        """
+        Generate whole sequence for IGBM, repear n_path times
+        This function is intentionally separate apart to generate intermediate results
+        Args:
+            var_0: initial variance
+            texp: time to expiry
+
+        Returns: n_path number of Variance paths (time, path) including the value at t=0
+        """
+        tobs = self.tobs(texp)
+        n_dt = len(tobs)
+        dt = np.diff(tobs, prepend=0)
+
+        var_t = np.full(self.n_path, var_0)
+        var_arr = [var_t]
+
+        if self.scheme < 2:
+            milstein = (self.scheme == 1)
+
+            for i in range(n_dt):
+                var_t = self.var_step_euler(var_t, dt[i], milstein=milstein)
+                var_arr.append(var_t)
+
+        elif self.scheme < 8:
+            for i in range(n_dt):
+                if self.scheme == 2:
+                    var_t = self.var_step_lie(var_t, dt[i], L1=True)
+                elif self.scheme == 3:
+                    var_t = self.var_step_lie(var_t, dt[i], L1=False)
+                elif self.scheme == 4:
+                    var_t = self.var_step_strang(var_t, dt[i], S1=True)
+                elif self.scheme == 5:
+                    var_t = self.var_step_strang(var_t, dt[i], S1=False)
+                elif self.scheme == 6:
+                    var_t = self.var_step_linear(var_t, dt[i])
+                elif self.scheme == 7:
+                    var_t = self.var_step_logode(var_t, dt[i])
+                var_arr.append(var_t)
+
+        else:
+            raise ValueError(f'Invalid scheme: {self.scheme}')
+
+        return var_arr
+
+
+    def cond_states(self, var_0, texp):
+        """
+        Final vol, integrated variance, integrated vol and integrated inverse vol over dt given var_0
+        The int_var is normalized by dt
+
+        Args:
+            var_0: initial variance
+            dt: time step
+
+        Returns:
+            (vol_final, var_mean, vol_mean, inverse_vol_mean)
+        """
+        tobs = self.tobs(texp)
+        n_dt = len(tobs)
+
+        # precalculate the Simpson's rule weight
+        weight = np.ones(n_dt + 1)
+        weight[1:-1:2] = 4
+        weight[2:-1:2] = 2
+        weight /= weight.sum()
+
+        var_arr = self.cond_sequence(var_0, texp)
+        vol_t = np.sqrt(var_arr[-1])
+
+        mean_var = weight @ var_arr
+        mean_vol = weight @ np.sqrt(var_arr)
+        mean_inv_vol = weight @ (1 / np.sqrt(var_arr))
 
         return vol_t, mean_var, mean_vol, mean_inv_vol
 
