@@ -2,7 +2,7 @@
 
 This is a class project for `Applied Stochastic Process`. The author is _Jiahao Yu_ and _Sun Bo_ from PHBS 2020 class. Our instructor is _Prof. Jaehyuk Choi_.
 
-This project mainly recover the works of: 
+This project are represented in `Garch-diffusion model.ipynb` and mainly recover the works of: 
 
 [1] Capriotti, L., Jiang, Y., & Shaimerdenova, G. (2019). Approximation methods for inhomogeneous geometric Brownian motion.  𝐼𝑛𝑡𝑒𝑟𝑛𝑎𝑡𝑖𝑜𝑛𝑎𝑙 𝐽𝑜𝑢𝑟𝑛𝑎𝑙 𝑜𝑓 𝑇ℎ𝑒𝑜𝑟𝑒𝑡𝑖𝑐𝑎𝑙 𝑎𝑛𝑑 𝐴𝑝𝑝𝑙𝑖𝑒𝑑 𝐹𝑖𝑛𝑎𝑛𝑐𝑒 ,  22 (02), 1850055.
 
